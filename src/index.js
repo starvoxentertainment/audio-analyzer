@@ -1,7 +1,7 @@
 import express from "express";
 import { z } from "zod";
 import { chmodSync, writeFileSync } from "node:fs";
-import { downloadAudio } from "./ytdlp.js";
+import { downloadAudio, getCookieDiagnostics } from "./ytdlp.js";
 import { analyzeAudio } from "./analyze.js";
 
 const PORT = Number(process.env.PORT) || 8080;
@@ -30,12 +30,16 @@ materializeCookiesEnv();
 const app = express();
 app.use(express.json({ limit: "256kb" }));
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+app.get("/health", async (_req, res) => {
+  const cookies = await getCookieDiagnostics();
+  res.json({ ok: true, cookies });
 });
 
 const RequestSchema = z.object({
-  youtubeUrl: z.string().url().regex(/youtu\.?be/i, "Must be a YouTube URL"),
+  youtubeUrl: z
+    .string()
+    .url()
+    .regex(/youtu\.?be/i, "Must be a YouTube URL"),
 });
 
 const ANALYZE_TIMEOUT_MS = 170_000;
@@ -43,14 +47,20 @@ const ANALYZE_TIMEOUT_MS = 170_000;
 app.post("/analyze", async (req, res) => {
   if (SHARED_SECRET) {
     const got = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-    if (got !== SHARED_SECRET) return res.status(401).json({ error: "unauthorized" });
+    if (got !== SHARED_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
   }
+
   const parsed = RequestSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+  }
 
   const { youtubeUrl } = parsed.data;
   let audioPath;
   let responded = false;
+
   const hardTimer = setTimeout(() => {
     if (!responded) {
       responded = true;
@@ -62,7 +72,10 @@ app.post("/analyze", async (req, res) => {
   try {
     audioPath = await downloadAudio(youtubeUrl);
     const analysis = await analyzeAudio(audioPath, youtubeUrl);
-    if (!responded) { responded = true; return res.json(analysis); }
+    if (!responded) {
+      responded = true;
+      return res.json(analysis);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[analyze] failed", youtubeUrl, msg);
@@ -74,9 +87,12 @@ app.post("/analyze", async (req, res) => {
   } finally {
     clearTimeout(hardTimer);
     if (audioPath) {
-      await import("node:fs/promises").then((fs) => fs.unlink(audioPath).catch(() => {}));
+      await import("node:fs/promises")
+        .then((fs) => fs.unlink(audioPath).catch(() => {}));
     }
   }
 });
 
-app.listen(PORT, () => { console.log(`[audio-analyzer] listening on :${PORT}`); });
+app.listen(PORT, () => {
+  console.log(`[audio-analyzer] listening on :${PORT}`);
+});
