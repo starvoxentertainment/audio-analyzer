@@ -1,1 +1,57 @@
+import express from "express";
+import { z } from "zod";
+import { downloadAudio } from "./ytdlp.js";
+import { analyzeAudio } from "./analyze.js";
 
+const PORT = Number(process.env.PORT) || 8080;
+const SHARED_SECRET = process.env.SHARED_SECRET || "";
+
+const app = express();
+app.use(express.json({ limit: "256kb" }));
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
+
+const RequestSchema = z.object({
+  youtubeUrl: z
+    .string()
+    .url()
+    .regex(/youtu\.?be/i, "Must be a YouTube URL"),
+});
+
+app.post("/analyze", async (req, res) => {
+  if (SHARED_SECRET) {
+    const got = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    if (got !== SHARED_SECRET) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+  }
+
+  const parsed = RequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+  }
+
+  const { youtubeUrl } = parsed.data;
+  let audioPath;
+  try {
+    audioPath = await downloadAudio(youtubeUrl);
+    const analysis = await analyzeAudio(audioPath, youtubeUrl);
+    return res.json(analysis);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[analyze] failed", youtubeUrl, msg);
+    const status = msg.startsWith("ytdlp_") ? 502 : 500;
+    return res.status(status).json({ error: msg.slice(0, 300) });
+  } finally {
+    if (audioPath) {
+      await import("node:fs/promises")
+        .then((fs) => fs.unlink(audioPath).catch(() => {}));
+    }
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`[audio-analyzer] listening on :${PORT}`);
+});
