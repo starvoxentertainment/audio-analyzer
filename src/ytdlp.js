@@ -1,10 +1,48 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, stat, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024; // 20 MB
 const YTDLP_TIMEOUT_MS = 120_000;
+
+/**
+ * Resolve a cookies file path for yt-dlp.
+ *
+ * Priority:
+ *   1. YT_COOKIES_FILE (already a path on disk)
+ *   2. YT_COOKIES      (raw Netscape cookies in an env var) -> write to /tmp
+ *
+ * Returns null if no cookies are configured.
+ */
+async function resolveCookiesFile() {
+  if (process.env.YT_COOKIES_FILE) return process.env.YT_COOKIES_FILE;
+
+  const raw = process.env.YT_COOKIES;
+  if (!raw) return null;
+
+  // Some hosts escape newlines as literal "\n". Restore real newlines.
+  const withNewlines =
+    raw.includes("\\n") && !raw.includes("\n")
+      ? raw.replace(/\\n/g, "\n")
+      : raw;
+  const body = withNewlines.replace(/\r\n/g, "\n").trimEnd() + "\n";
+
+  const cookiesPath = path.join(tmpdir(), "youtube-cookies.txt");
+  try {
+    await writeFile(cookiesPath, body, { encoding: "utf8", mode: 0o600 });
+    await chmod(cookiesPath, 0o600);
+    process.env.YT_COOKIES_FILE = cookiesPath;
+    console.log("[audio-analyzer] YouTube cookies materialized from YT_COOKIES");
+    return cookiesPath;
+  } catch (err) {
+    console.error(
+      "[audio-analyzer] failed to write YT_COOKIES",
+      err?.message || err
+    );
+    return null;
+  }
+}
 
 /**
  * Downloads bestaudio for a YouTube URL via yt-dlp, converted to MP3, into a
@@ -41,8 +79,14 @@ export async function downloadAudio(youtubeUrl) {
     "--retries",
     "3",
   ];
-  if (process.env.YT_COOKIES_FILE) {
-    args.push("--cookies", process.env.YT_COOKIES_FILE);
+
+  const cookiesFile = await resolveCookiesFile();
+  if (cookiesFile) {
+    args.push("--cookies", cookiesFile);
+  } else {
+    console.warn(
+      "[audio-analyzer] no cookies configured (YT_COOKIES or YT_COOKIES_FILE) — YouTube bot-check is likely to fail"
+    );
   }
   args.push("-o", outTemplate, youtubeUrl);
 
