@@ -148,3 +148,128 @@ THIS audio):
   "hits": [
     { "at_ms": 14200, "kind": "phone_moment", "subdivision": "downbeat", "intensity": 6, "note": "piano enters — audience would raise phones for the iconic chord" },
     { "at_ms": 25000, "kind": "vocal_cue", "subdivision": "downbeat", "intensity": 7, "note": "'Mama' — title-adjacent hook, lead vocal soars" },
+    { "at_ms": 48000, "kind": "tempo_change", "subdivision": "downbeat", "intensity": 8, "note": "tempo doubles into Galileo section" },
+    { "at_ms": 52000, "kind": "hook_word", "subdivision": "offbeat", "intensity": 8, "note": "'Galileo!' first call" },
+    { "at_ms": 54000, "kind": "hook_word", "subdivision": "offbeat", "intensity": 8, "note": "'Galileo!' answer" },
+    { "at_ms": 74500, "kind": "snare_roll_end", "subdivision": "downbeat", "intensity": 9, "note": "drum fill explodes into rock section" },
+    { "at_ms": 75000, "kind": "drop", "subdivision": "downbeat", "intensity": 10, "note": "kick + full band hit on 'So you think you can stone me'" },
+    { "at_ms": 75000, "kind": "phone_moment", "subdivision": "downbeat", "intensity": 10, "note": "the moment the entire stadium goes berserk" }
+  ],
+  "lyric_anchors": [
+    { "at_ms": 22000, "phrase": "Mama, just killed a man" },
+    { "at_ms": 52000, "phrase": "Galileo, Galileo" },
+    { "at_ms": 75000, "phrase": "So you think you can stone me" }
+  ]
+}`;
+
+function decodePcm(mp3Path) {
+  return new Promise((resolve, reject) => {
+    const args = ["-v", "error", "-i", mp3Path, "-ac", "1", "-ar", "22050", "-f", "f32le", "pipe:1"];
+    const ff = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    let stderr = "";
+    ff.stdout.on("data", (d) => chunks.push(d));
+    ff.stderr.on("data", (d) => { stderr += d.toString(); });
+    ff.on("error", (e) => reject(new Error(`ffmpeg_spawn_failed: ${e.message}`)));
+    ff.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`ffmpeg_exit_${code}: ${stderr.slice(0, 200)}`));
+      const buf = Buffer.concat(chunks);
+      const samples = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 4));
+      resolve(samples);
+    });
+  });
+}
+
+function chunkedBase64(bytes) {
+  return Buffer.from(bytes).toString("base64");
+}
+
+async function callGeminiWithModel(audioBytes, model) {
+  const key = process.env.LOVABLE_API_KEY;
+  if (!key) throw new Error("missing_LOVABLE_API_KEY");
+
+  const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: USER_TEXT },
+            { type: "input_audio", input_audio: { data: chunkedBase64(audioBytes), format: "mp3" } },
+          ],
+        },
+      ],
+      response_format: { type: "json_object" },
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`gemini_http_${res.status}: ${body.slice(0, 200)}`);
+  }
+  const json = await res.json();
+  const content = json?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("gemini_empty_content");
+  try {
+    return JSON.parse(content);
+  } catch {
+    throw new Error("gemini_invalid_json");
+  }
+}
+
+async function callGemini(audioBytes) {
+  try {
+    return await callGeminiWithModel(audioBytes, "google/gemini-2.5-pro");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg !== "gemini_empty_content") throw err;
+    console.warn("[analyze] Gemini Pro returned empty content; retrying with Flash");
+  }
+
+  try {
+    return await callGeminiWithModel(audioBytes, "google/gemini-2.5-flash");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "gemini_empty_content") throw new Error("gemini_empty_after_fallback");
+    throw err;
+  }
+}
+
+function clampInt(n, min, max, fallback) {
+  const v = Math.round(Number(n));
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(min, Math.min(max, v));
+}
+
+export async function analyzeAudio(mp3Path, _youtubeUrl) {
+  let bpm = null;
+  try {
+    const samples = await decodePcm(mp3Path);
+    const mt = new MusicTempo(Array.from(samples));
+    if (Number.isFinite(mt?.tempo)) bpm = clampInt(mt.tempo, 40, 220, null);
+  } catch (e) {
+    console.warn("[analyze] music-tempo failed", e?.message || e);
+  }
+
+  const mp3Bytes = await readFile(mp3Path);
+  const gemini = await callGemini(mp3Bytes);
+
+  const merged = {
+    bpm: clampInt(gemini.bpm ?? bpm, 40, 220, bpm ?? 120),
+    beats_per_bar: [3, 4, 6].includes(Number(gemini.beats_per_bar)) ? Number(gemini.beats_per_bar) : 4,
+    mood: typeof gemini.mood === "string" && gemini.mood ? gemini.mood : "neutral",
+    energy: clampInt(gemini.energy, 1, 10, 5),
+    sections: Array.isArray(gemini.sections) ? gemini.sections : [],
+    hits: Array.isArray(gemini.hits) ? gemini.hits : [],
+    lyric_anchors: Array.isArray(gemini.lyric_anchors) ? gemini.lyric_anchors : [],
+    analysis_prompt_version: ANALYSIS_PROMPT_VERSION,
+  };
+
+  return merged;
+}
