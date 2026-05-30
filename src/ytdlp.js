@@ -24,18 +24,15 @@ export async function downloadAudio(youtubeUrl) {
     "--audio-format",
     "mp3",
     "--audio-quality",
-    "5", // ~128 kbps VBR is plenty for analysis
+    "5",
     "--no-playlist",
     "--no-warnings",
     "--no-progress",
-    "--no-call-home",
     "--quiet",
     "--max-filesize",
     "25M",
     "--retries",
     "3",
-    // Prefer mobile app clients. The older tv_simply/web_safari/mweb
-    // workaround is now deprecated/noisy in recent yt-dlp builds.
     "--extractor-args",
     "youtube:player_client=android,ios",
   ];
@@ -43,7 +40,6 @@ export async function downloadAudio(youtubeUrl) {
     args.push("--cookies", process.env.YT_COOKIES_FILE);
   }
   args.push("-o", outTemplate, youtubeUrl);
-
 
   await new Promise((resolve, reject) => {
     const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
