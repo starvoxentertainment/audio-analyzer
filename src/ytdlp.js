@@ -32,10 +32,19 @@ export async function downloadAudio(youtubeUrl) {
     "--quiet",
     "--max-filesize",
     "25M",
-    "-o",
-    outTemplate,
-    youtubeUrl,
+    "--retries",
+    "3",
+    // Workaround for YouTube's "Sign in to confirm you're not a bot" check
+    // on datacenter IPs. The default web client is now bot-checked; switch
+    // to client variants that currently bypass it. See yt-dlp #14198 / #14693.
+    "--extractor-args",
+    "youtube:player_client=tv_simply,web_safari,mweb",
   ];
+  if (process.env.YT_COOKIES_FILE) {
+    args.push("--cookies", process.env.YT_COOKIES_FILE);
+  }
+  args.push("-o", outTemplate, youtubeUrl);
+
 
   await new Promise((resolve, reject) => {
     const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
