@@ -1,10 +1,65 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, stat, writeFile, chmod } from "node:fs/promises";
+import { mkdtemp, stat, writeFile, chmod, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024; // 20 MB
 const YTDLP_TIMEOUT_MS = 120_000;
+
+/**
+ * Inspect a cookie file body for safe diagnostics. Never returns cookie values.
+ */
+function inspectCookieBody(body) {
+  const lines = body.split("\n");
+  const nonEmpty = lines.filter((l) => l.trim().length > 0);
+  const dataLines = nonEmpty.filter((l) => !l.startsWith("#"));
+  const youtubeLines = dataLines.filter((l) => /youtube\.com/i.test(l));
+  const hasNetscapeHeader = /Netscape HTTP Cookie File/i.test(lines[0] || "");
+  const cookieNames = new Set();
+  for (const line of dataLines) {
+    const parts = line.split("\t");
+    if (parts.length >= 6) cookieNames.add(parts[5]);
+  }
+  const importantPresent = [
+    "SID",
+    "HSID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+    "__Secure-1PSID",
+    "__Secure-3PSID",
+    "LOGIN_INFO",
+  ].filter((n) => cookieNames.has(n));
+  return {
+    bytes: body.length,
+    totalLines: lines.length,
+    dataLines: dataLines.length,
+    youtubeLines: youtubeLines.length,
+    hasNetscapeHeader,
+    importantCookies: importantPresent,
+  };
+}
+
+export async function getCookieDiagnostics() {
+  const hasEnv = !!process.env.YT_COOKIES;
+  const hasFileEnv = !!process.env.YT_COOKIES_FILE;
+  let file = null;
+  let inspection = null;
+  try {
+    const resolved = await resolveCookiesFile();
+    if (resolved) {
+      file = resolved;
+      const body = await readFile(resolved, "utf8").catch(() => "");
+      if (body) inspection = inspectCookieBody(body);
+    }
+  } catch {}
+  return {
+    YT_COOKIES_set: hasEnv,
+    YT_COOKIES_FILE_set: hasFileEnv,
+    resolvedFile: file,
+    inspection,
+  };
+}
 
 /**
  * Resolve a cookies file path for yt-dlp.
@@ -21,7 +76,6 @@ async function resolveCookiesFile() {
   const raw = process.env.YT_COOKIES;
   if (!raw) return null;
 
-  // Some hosts escape newlines as literal "\n". Restore real newlines.
   const withNewlines =
     raw.includes("\\n") && !raw.includes("\n")
       ? raw.replace(/\\n/g, "\n")
@@ -33,7 +87,22 @@ async function resolveCookiesFile() {
     await writeFile(cookiesPath, body, { encoding: "utf8", mode: 0o600 });
     await chmod(cookiesPath, 0o600);
     process.env.YT_COOKIES_FILE = cookiesPath;
-    console.log("[audio-analyzer] YouTube cookies materialized from YT_COOKIES");
+
+    const info = inspectCookieBody(body);
+    console.log(
+      "[audio-analyzer] cookies materialized from YT_COOKIES",
+      JSON.stringify({ path: cookiesPath, ...info })
+    );
+    if (!info.hasNetscapeHeader) {
+      console.warn(
+        "[audio-analyzer] cookie file is missing the Netscape header line — yt-dlp will reject it"
+      );
+    }
+    if (info.youtubeLines === 0) {
+      console.warn(
+        "[audio-analyzer] cookie file has no youtube.com entries — auth will fail"
+      );
+    }
     return cookiesPath;
   } catch (err) {
     console.error(
@@ -48,9 +117,6 @@ async function resolveCookiesFile() {
  * Downloads bestaudio for a YouTube URL via yt-dlp, converted to MP3, into a
  * temp file. Returns the absolute path to the MP3. Caller is responsible for
  * unlinking it.
- *
- * Throws Error with messages prefixed `ytdlp_` so the HTTP layer can map
- * them to 502s.
  */
 export async function downloadAudio(youtubeUrl) {
   const dir = await mkdtemp(path.join(tmpdir(), "ytdl-"));
@@ -58,18 +124,13 @@ export async function downloadAudio(youtubeUrl) {
   const outPath = path.join(dir, "audio.mp3");
 
   const args = [
-    // Explicit format ladder: prefer m4a, then webm, then any audio, then
-    // fall back to a muxed stream. Pinning to mobile-only player_clients
-    // (android/ios) was returning manifests with no plain audio stream,
-    // causing "Requested format is not available". Let yt-dlp use its
-    // default client ladder instead.
     "-f",
     "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
     "-x",
     "--audio-format",
     "mp3",
     "--audio-quality",
-    "5", // ~128 kbps VBR is plenty for analysis
+    "5",
     "--no-playlist",
     "--no-warnings",
     "--no-progress",
@@ -81,15 +142,17 @@ export async function downloadAudio(youtubeUrl) {
   ];
 
   const cookiesFile = await resolveCookiesFile();
+  let cookiesNote = "";
   if (cookiesFile) {
     args.push("--cookies", cookiesFile);
+    cookiesNote = `cookies=${cookiesFile}`;
   } else {
+    cookiesNote = "cookies=NONE";
     console.warn(
       "[audio-analyzer] no cookies configured (YT_COOKIES or YT_COOKIES_FILE) — YouTube bot-check is likely to fail"
     );
   }
   args.push("-o", outTemplate, youtubeUrl);
-
 
   await new Promise((resolve, reject) => {
     const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -119,7 +182,11 @@ export async function downloadAudio(youtubeUrl) {
         const snippet = (lines.length ? lines : stderr.split("\n").filter(Boolean))
           .slice(-4)
           .join(" | ");
-        return reject(new Error(`ytdlp_exit_${code}: ${snippet.slice(0, 300)}`));
+        return reject(
+          new Error(
+            `ytdlp_exit_${code}: [${cookiesNote}] ${snippet.slice(0, 300)}`
+          )
+        );
       }
       resolve();
     });
