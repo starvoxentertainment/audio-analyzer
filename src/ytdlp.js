@@ -20,11 +20,18 @@ export async function downloadAudio(youtubeUrl) {
   const outPath = path.join(dir, "audio.mp3");
 
   const args = [
+    // Explicit format ladder: prefer m4a, then webm, then any audio, then
+    // fall back to a muxed stream. Pinning to mobile-only player_clients
+    // (android/ios) was returning manifests with no plain audio stream,
+    // causing "Requested format is not available". Let yt-dlp use its
+    // default client ladder instead.
+    "-f",
+    "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
     "-x",
     "--audio-format",
     "mp3",
     "--audio-quality",
-    "5",
+    "5", // ~128 kbps VBR is plenty for analysis
     "--no-playlist",
     "--no-warnings",
     "--no-progress",
@@ -33,13 +40,12 @@ export async function downloadAudio(youtubeUrl) {
     "25M",
     "--retries",
     "3",
-    "--extractor-args",
-    "youtube:player_client=android,ios",
   ];
   if (process.env.YT_COOKIES_FILE) {
     args.push("--cookies", process.env.YT_COOKIES_FILE);
   }
   args.push("-o", outTemplate, youtubeUrl);
+
 
   await new Promise((resolve, reject) => {
     const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
