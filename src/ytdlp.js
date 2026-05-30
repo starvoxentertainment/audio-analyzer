@@ -34,22 +34,23 @@ export async function downloadAudio(youtubeUrl) {
     "25M",
     "--retries",
     "3",
-    // Workaround for YouTube's "Sign in to confirm you're not a bot" check
-    // on datacenter IPs. The default web client is now bot-checked; switch
-    // to client variants that currently bypass it. See yt-dlp #14198 / #14693.
+    // Prefer mobile app clients. The older tv_simply/web_safari/mweb
+    // workaround is now deprecated/noisy in recent yt-dlp builds.
     "--extractor-args",
-    "youtube:player_client=tv_simply,web_safari,mweb",
+    "youtube:player_client=android,ios",
   ];
+
   if (process.env.YT_COOKIES_FILE) {
     args.push("--cookies", process.env.YT_COOKIES_FILE);
   }
-  args.push("-o", outTemplate, youtubeUrl);
 
+  args.push("-o", outTemplate, youtubeUrl);
 
   await new Promise((resolve, reject) => {
     const child = spawn("yt-dlp", args, { stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     let killed = false;
+
     const timer = setTimeout(() => {
       killed = true;
       child.kill("SIGKILL");
@@ -58,24 +59,46 @@ export async function downloadAudio(youtubeUrl) {
     child.stderr.on("data", (d) => {
       stderr += d.toString();
     });
+
     child.on("error", (e) => {
       clearTimeout(timer);
       reject(new Error(`ytdlp_spawn_failed: ${e.message}`));
     });
+
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (killed) return reject(new Error("ytdlp_timeout"));
-      if (code !== 0) {
-        const snippet = stderr.split("\n").filter(Boolean).slice(-3).join(" | ");
-        return reject(new Error(`ytdlp_exit_${code}: ${snippet.slice(0, 200)}`));
+
+      if (killed) {
+        return reject(new Error("ytdlp_timeout"));
       }
+
+      if (code !== 0) {
+        const lines = stderr
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .filter((line) => !line.startsWith("WARNING:"));
+
+        const snippet = (lines.length ? lines : stderr.split("\n").filter(Boolean))
+          .slice(-4)
+          .join(" | ");
+
+        return reject(new Error(`ytdlp_exit_${code}: ${snippet.slice(0, 300)}`));
+      }
+
       resolve();
     });
   });
 
   const s = await stat(outPath).catch(() => null);
-  if (!s) throw new Error("ytdlp_no_output_file");
-  if (s.size > MAX_AUDIO_BYTES) throw new Error("ytdlp_audio_too_large");
+
+  if (!s) {
+    throw new Error("ytdlp_no_output_file");
+  }
+
+  if (s.size > MAX_AUDIO_BYTES) {
+    throw new Error("ytdlp_audio_too_large");
+  }
 
   return outPath;
 }
