@@ -20,6 +20,8 @@ const RequestSchema = z.object({
     .regex(/youtu\.?be/i, "Must be a YouTube URL"),
 });
 
+const ANALYZE_TIMEOUT_MS = 170_000;
+
 app.post("/analyze", async (req, res) => {
   if (SHARED_SECRET) {
     const got = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
@@ -35,16 +37,33 @@ app.post("/analyze", async (req, res) => {
 
   const { youtubeUrl } = parsed.data;
   let audioPath;
+  let responded = false;
+
+  const hardTimer = setTimeout(() => {
+    if (!responded) {
+      responded = true;
+      console.error("[analyze] hard timeout", youtubeUrl);
+      res.status(504).json({ error: "analyzer_hard_timeout" });
+    }
+  }, ANALYZE_TIMEOUT_MS);
+
   try {
     audioPath = await downloadAudio(youtubeUrl);
     const analysis = await analyzeAudio(audioPath, youtubeUrl);
-    return res.json(analysis);
+    if (!responded) {
+      responded = true;
+      return res.json(analysis);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[analyze] failed", youtubeUrl, msg);
-    const status = msg.startsWith("ytdlp_") ? 502 : 500;
-    return res.status(status).json({ error: msg.slice(0, 300) });
+    if (!responded) {
+      responded = true;
+      const status = msg.startsWith("ytdlp_") ? 502 : 500;
+      return res.status(status).json({ error: msg.slice(0, 300) });
+    }
   } finally {
+    clearTimeout(hardTimer);
     if (audioPath) {
       await import("node:fs/promises")
         .then((fs) => fs.unlink(audioPath).catch(() => {}));
