@@ -27,15 +27,15 @@ const BROWSER_HEADERS = [
 ];
 
 // Fallback strategies. Each tries a different player_client combo.
-// Do not use player_skip=configs by default: on Railway it can turn a bot-check
-// into "Failed to extract any player response", which prevents useful fallback.
+// Avoid mweb/web,mweb and player_skip=configs by default: on Railway those can
+// turn a bot-check into "Failed to extract any player response".
+// The final "default" strategy lets the latest yt-dlp choose its own client.
 const STRATEGIES = [
   { name: "web", playerClient: "web", playerSkip: null },
-  { name: "mweb", playerClient: "mweb", playerSkip: null },
-  { name: "web,mweb", playerClient: "web,mweb", playerSkip: null },
   { name: "tv_embedded", playerClient: "tv_embedded", playerSkip: null },
   { name: "ios", playerClient: "ios", playerSkip: null },
   { name: "android", playerClient: "android", playerSkip: null },
+  { name: "default", playerClient: null, playerSkip: null },
 ];
 
 let ytDlpVersionPromise = null;
@@ -179,7 +179,10 @@ function runYtDlp({
     args.push("--add-header", h);
   }
 
-  const extractorArgs = [`youtube:player_client=${strategy.playerClient}`];
+  const extractorArgs = [];
+  if (strategy.playerClient) {
+    extractorArgs.push(`youtube:player_client=${strategy.playerClient}`);
+  }
   if (strategy.playerSkip) {
     extractorArgs.push(`youtube:player_skip=${strategy.playerSkip}`);
   }
@@ -255,6 +258,13 @@ function classifyYtDlpError(err) {
   }
   if (/timeout/i.test(msg)) return "timeout";
   return "unknown";
+}
+
+function describeYtDlpErrorKind(kind) {
+  if (kind === "extractor") return "extractor-broken-client";
+  if (kind === "bot-check") return "youtube-bot-check";
+  if (kind === "format") return "format-unavailable";
+  return kind;
 }
 
 function getYtDlpVersion() {
@@ -359,7 +369,7 @@ export async function downloadAudio(youtubeUrl) {
       attempts.push(`${strategy.name}:${kind}:${(err.message || "").slice(0, 80)}`);
       lastErr = err;
       console.warn(
-        `[audio-analyzer] yt-dlp failed strategy=${strategy.name} mode=extract kind=${kind}: ${err.message}`
+        `[audio-analyzer] yt-dlp failed strategy=${strategy.name} mode=extract kind=${kind} reason=${describeYtDlpErrorKind(kind)}: ${err.message}`
       );
       if (!isRetryableBotError(err)) break;
     }
@@ -392,7 +402,7 @@ export async function downloadAudio(youtubeUrl) {
         attempts.push(`${strategy.name}+raw:${kind}:${(err.message || "").slice(0, 80)}`);
         lastErr = err;
         console.warn(
-          `[audio-analyzer] yt-dlp failed strategy=${strategy.name} mode=raw kind=${kind}: ${err.message}`
+          `[audio-analyzer] yt-dlp failed strategy=${strategy.name} mode=raw kind=${kind} reason=${describeYtDlpErrorKind(kind)}: ${err.message}`
         );
         if (!isRetryableBotError(err)) break;
       }
