@@ -1,18 +1,20 @@
 FROM node:20-bookworm-slim
 
-# Cache-bust so Railway re-downloads the latest yt-dlp on rebuild.
+# Cache-bust so Railway re-downloads yt-dlp on rebuild.
 # Bump this value to force a fresh yt-dlp binary.
-ARG YTDLP_REV=2026-05-31-3
+ARG YTDLP_REV=nightly-2026-05-31-1
 
-# yt-dlp + ffmpeg + python (yt-dlp runs on python3)
+# yt-dlp nightly + ffmpeg + python.
+# The stable yt-dlp release is currently failing YouTube player extraction;
+# nightly often contains YouTube extractor fixes before the stable release.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg python3 ca-certificates curl \
- && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+ && curl -L https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
  && chmod +x /usr/local/bin/yt-dlp \
  && echo "yt-dlp rev: ${YTDLP_REV}" \
+ && yt-dlp --version \
  && apt-get purge -y curl \
  && rm -rf /var/lib/apt/lists/*
-
 
 WORKDIR /app
 
