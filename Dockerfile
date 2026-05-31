@@ -2,7 +2,7 @@ FROM node:20-bookworm-slim
 
 # Cache-bust so Railway re-downloads the latest yt-dlp on rebuild.
 # Bump this value to force a fresh yt-dlp binary.
-ARG YTDLP_REV=2026-05-30-3
+ARG YTDLP_REV=2026-05-31-1
 
 # yt-dlp + ffmpeg + python (yt-dlp runs on python3)
 RUN apt-get update \
